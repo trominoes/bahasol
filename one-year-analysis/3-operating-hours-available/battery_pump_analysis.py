@@ -45,14 +45,14 @@ Dependencies
 
 YEAR = 2024
 INPUT_CSV  = f'one-year-analysis/1-solar-power/gen-power/4469509_24.96_-78.05_{YEAR}_power.csv'
-OUTPUT_CSV = f'one-year-analysis/3-operating-hours/battery-pump/4469509_24.96_-78.05_{YEAR}_system.csv'
-IMAGES_DIR = f'one-year-analysis/3-operating-hours/images/{YEAR}'
+OUTPUT_CSV = f'one-year-analysis/3-operating-hours-available/battery-pump/4469509_24.96_-78.05_{YEAR}_system.csv'
+IMAGES_DIR = f'one-year-analysis/3-operating-hours-available/images/{YEAR}'
 
 # ---------------------------------------------------------------------------
 # Battery: 48 V Lithium (LiFePO₄)
 # Set BATTERY_CAPACITY_KWH = 0 for a solar-only system (no battery).
 # ---------------------------------------------------------------------------
-BATTERY_CAPACITY_KWH     = 2.0  # Nameplate capacity [kWh].  Set to 0 for no battery.
+BATTERY_CAPACITY_KWH     = 0.0  # Nameplate capacity [kWh].  Set to 0 for no battery.
 BATTERY_MIN_SOC_PCT      = 0.10   # Minimum allowed SoC (protects cycle life) [fraction]
 BATTERY_MAX_SOC_PCT      = 1.00   # Maximum SoC [fraction]
 BATTERY_INITIAL_SOC_PCT  = 1.00   # SoC at the very start of the year [fraction]
