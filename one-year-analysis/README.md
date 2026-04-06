@@ -1,17 +1,16 @@
-# BahaSol — One-Year Solar-Powered Drip Irrigation Feasibility Analysis
+# BahaSol — Solar-Powered Drip Irrigation Feasibility Analysis
 
 ## Project Overview
 
 This analysis evaluates whether a solar-powered drip irrigation system can
-reliably supply a small farm's water needs across a full growing season.  The
-site is a 0.78-acre plot in the Bahamas (latitude ≈ 25 °N) with a 14.39 GPM
-drip irrigation pump drawing 1.263 kW of AC power.  The system pairs a
-photovoltaic array with a LiFePO4 battery to extend pumping hours beyond
-direct-solar periods.
+reliably supply a small farm's water needs across a full growing season in a
+tropical maritime climate.  The system pairs a photovoltaic array with a
+LiFePO4 battery bank and a hybrid inverter to power a centrifugal irrigation
+pump using only renewable energy.
 
-The analysis covers seven years of historical weather data (2018–2024) using
-real hourly solar irradiance records and reanalysis-based climate data.  The
-goal is to find the minimum-cost system configuration — number of panels,
+The analysis covers seven years of historical weather data (2018–2024) to
+capture inter-annual variability in solar irradiance and crop water demand.
+The goal is to find the minimum-cost system configuration — number of panels,
 battery capacity, and associated hardware — that meets a user-specified
 irrigation reliability threshold (default 95 % of scheduled irrigation days
 fully served).
@@ -20,13 +19,13 @@ fully served).
 
 ## Analysis Pipeline
 
-The analysis is organized as a six-module pipeline, each in a numbered folder.
-Modules may be run independently or chained together via the master script in
-`6-run-sims/`.
+The analysis is organized as a seven-module pipeline, each in a numbered
+folder.  Modules may be run independently or chained together via the master
+script in `6-run-sims/`.
 
 ```
 1-solar-power/          Hourly DC power output from the PV array
-2-pump-power/           Pump operating characteristics and VFD sizing
+2-pump-power/           Pump operating characteristics and hardware sizing
 3-operating-hours-      Greedy battery+pump simulation (how many hours can
   available/              the pump run each year regardless of schedule?)
 4-irrigation/           FAO-56 ET₀, crop water demand, weekly schedule
@@ -62,9 +61,6 @@ python run_simulation.py --sweep-panels 10 12 15 18 20 --sweep-battery 1 2 3
 
 ### Running individual modules
 
-Each module's README describes how to run it standalone.  The most common
-entry points are:
-
 ```bash
 # Fetch climate data (one-time setup, calls NSRDB + Open-Meteo APIs)
 cd 4-irrigation && python fetch_et_data.py
@@ -92,9 +88,8 @@ cd 7-cost-analysis && python cost_analysis.py --reliability 95
 | Hourly wind speed (10 m) | NSRDB PSM3 v3 | 2018–2024 |
 | Crop coefficients (Kc) | FAO-56 Tables 11 & 12 | — |
 
-NSRDB files are downloaded manually from https://nsrdb.nrel.gov/data-viewer
-(site ID 4469509, 24.96 °N / −78.05 °W, UTC−5).  Open-Meteo data is fetched
-automatically at runtime with no API key required.
+NSRDB files are downloaded manually from https://nsrdb.nrel.gov/data-viewer.
+Open-Meteo data is fetched automatically at runtime with no API key required.
 
 ---
 
@@ -102,12 +97,10 @@ automatically at runtime with no API key required.
 
 | Parameter | Default | Description |
 |---|---|---|
-| Farm area | 0.78 acres | Total irrigated area |
 | Pump power | 1.263 kW | AC draw (all-or-nothing load) |
-| Pump flow | 14.39 GPM | Delivered at the drip manifold |
 | Drip efficiency | 90 % | Fraction of pumped water reaching roots |
 | Panel rated power | 405 W | Per panel at STC |
-| Panel tilt | 24 ° | From horizontal (≈ site latitude) |
+| Panel tilt | 24 ° | From horizontal |
 | Battery chemistry | LiFePO4 48 V | Deep-cycle, ≥10 % SoC floor |
 | Charge / discharge eff. | 95 % / 95 % | Round-trip ≈ 90 % |
 | Growing season | Sep 1 → May 31 | Cross-year (9 months) |
@@ -124,7 +117,7 @@ or via command-line flags.
 NSRDB raw CSVs
       │
       ▼
-1-solar-power          →  gen-power/*_power.csv
+1-solar-power          →  gen-power/*_power.csv  (reference: 15 panels)
                                 │
       ┌─────────────────────────┴────────────────────────┐
       ▼                                                   ▼
@@ -132,7 +125,11 @@ NSRDB raw CSVs
 (greedy pump hours)                            (schedule-constrained)
                                                           ▲
 4-irrigation  →  et-data/ + results/  ─────────────────────┘
+                                                          │
+                                               6-run-sims/output/sweep/
+                                               reliability_matrix.csv
+                                                          │
+                                                          ▼
+                                               7-cost-analysis
+                                               (minimum-cost config)
 ```
-
-`7-cost-analysis` reads the reliability matrix from `6-run-sims/output/sweep/`
-and applies component cost and shipping models to identify the optimal build.

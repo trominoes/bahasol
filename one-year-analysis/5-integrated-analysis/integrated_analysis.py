@@ -81,7 +81,7 @@ MAX_DAILY_HRS = 8.0    # absolute cap on pump hours per irrigation day
 _HERE           = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SOLAR_DIR   = os.path.join(_HERE, '..', '1-solar-power', 'gen-power')
 DEFAULT_SCHED_DIR   = os.path.join(_HERE, '..', '4-irrigation', 'results')
-DEFAULT_OUTPUT_DIR  = os.path.join(_HERE)
+DEFAULT_OUTPUT_DIR  = os.path.join(_HERE, 'results')   # CSVs → results/<season_tag>/
 DEFAULT_IMAGES_DIR  = os.path.join(_HERE, 'images')
 
 # Day-of-week mapping (1=Mon … 7=Sun) for each schedule size
@@ -230,7 +230,13 @@ def simulate_season(solar_power: dict, daily_sched: dict,
     -------
     List of hourly record dicts (one per hour in the growing season).
     """
-    panel_scale = n_panels / N_PANELS  # relative to default 15-panel array
+    # _SOLAR_REF_PANELS is the fixed panel count used when the solar gen-power
+    # CSVs were generated (always 15 — see 1-solar-power/).  It must NOT be
+    # confused with N_PANELS (the user-configurable default), which may be
+    # monkey-patched by run_simulation.py during a sweep.  Using N_PANELS here
+    # caused every sweep configuration to produce panel_scale = 1.0.
+    _SOLAR_REF_PANELS = 15
+    panel_scale = n_panels / _SOLAR_REF_PANELS  # relative to reference 15-panel CSVs
 
     no_battery = (battery_kwh <= 0.0)
     min_soc    = 0.0 if no_battery else battery_kwh * BATTERY_MIN_SOC_PCT
@@ -786,14 +792,18 @@ def main():
     print_report(weekly_res, daily_res, year, args.crop,
                  args.battery_kwh, args.panels)
 
-    # Save CSVs
-    slug = args.crop.replace('_', '-')
-    tag  = f'{slug}_{year}_p{args.panels}_b{args.battery_kwh:.0f}kWh'
+    # Save CSVs — each configuration gets its own subfolder so the results/
+    # directory stays navigable even after many sweep runs.
+    # Folder structure:  results/<crop>_<year>_p<panels>_b<battery>kWh/
+    slug     = args.crop.replace('_', '-')
+    tag      = f'{slug}_{year}_p{args.panels}_b{args.battery_kwh:.0f}kWh'
+    out_dir  = os.path.join(args.output_dir, tag)
+    os.makedirs(out_dir, exist_ok=True)
     save_csv(daily_res,
-             os.path.join(args.output_dir, f'daily_energy_{tag}.csv'),
+             os.path.join(out_dir, f'daily_energy_{tag}.csv'),
              'daily energy results')
     save_csv(weekly_res,
-             os.path.join(args.output_dir, f'weekly_energy_{tag}.csv'),
+             os.path.join(out_dir, f'weekly_energy_{tag}.csv'),
              'weekly energy results')
 
     # Plots
