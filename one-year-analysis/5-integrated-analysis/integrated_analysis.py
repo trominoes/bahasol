@@ -63,19 +63,57 @@ PANEL_RATED_POWER_W  = 405.0
 INVERTER_EFF         = 0.96   # DC → AC
 
 # ── Battery ──
-BATTERY_CAPACITY_KWH    = 2.0
+BATTERY_CAPACITY_KWH    = 5.0
 BATTERY_MIN_SOC_PCT     = 0.10
-BATTERY_MAX_SOC_PCT     = 1.00
+BATTERY_MAX_SOC_PCT     = 0.85
 BATTERY_INITIAL_SOC_PCT = 1.00
 BATTERY_CHARGE_EFF      = 0.95
 BATTERY_DISCHARGE_EFF   = 0.95
 
 # ── Pump ──
 PUMP_POWER_KW            = 1.263
-MIN_SOLAR_FOR_DISCHARGE  = 0.10   # kW AC — no battery discharge below this
+MIN_SOLAR_FOR_DISCHARGE  = 0.10  # kW DC — battery may not discharge below this solar floor.
+                                  # Matched to run_simulation.py CONFIG (min_solar_discharge = 0.10).
+                                  # The old default of 1.0 kW effectively disabled the battery
+                                  # during cloud events, making battery size irrelevant.
+
+# ── Pump application rate (must match 4-irrigation/irrigation_schedule.py) ──
+# These are used to convert SWD-based irrigation targets [mm] → pump hours.
+# run_simulation.py patches these if farm area or pump specs change.
+PUMP_FLOW_GPM        = 14.39
+DRIP_EFFICIENCY      = 0.90
+FARM_AREA_ACRES      = 0.78
+FARM_AREA_M2         = FARM_AREA_ACRES * 4046.8564
+_L_PER_GAL           = 3.785411784
+PUMP_FLOW_M3_HR      = PUMP_FLOW_GPM * _L_PER_GAL * 60.0 / 1000.0
+GROSS_APP_RATE_MM_HR = PUMP_FLOW_M3_HR * 1000.0 / FARM_AREA_M2
+NET_APP_RATE_MM_HR   = GROSS_APP_RATE_MM_HR * DRIP_EFFICIENCY   # ≈ 0.932 mm/hr
 
 # ── Irrigation schedule constraints ──
-MAX_DAILY_HRS = 8.0    # absolute cap on pump hours per irrigation day
+MAX_DAILY_HRS    = 8.0   # absolute cap on pump hours per irrigation day
+PUMP_START_HOUR  = 8     # earliest local hour the pump may be started (24-hr)
+                         # reflects that a manually operated system won't begin
+                         # at first light; battery pre-charges while waiting
+
+# ── Control mode ──
+# CONTINUOUS_RUN = False  (default / solar-following):
+#   The pump accumulates target hours across the day, skipping hours when
+#   solar + battery cannot meet demand and resuming when conditions improve.
+#   Models a smart controller (or an attentive operator) that cycles the
+#   pump in sync with generation.
+#
+# CONTINUOUS_RUN = True  (continuous-run / Tier 1):
+#   The farmer makes a single visit at PUMP_START_HOUR:
+#     • If power is available at PUMP_START_HOUR → pump starts.  Any
+#       subsequent energy failure halts it for the rest of the day (no restart).
+#     • If power is NOT available at PUMP_START_HOUR → farmer leaves without
+#       starting the pump; it stays off all day.
+#   This means more battery cannot produce more unfulfilled days: a larger
+#   battery is always at least as likely to start at PUMP_START_HOUR and to
+#   sustain the pump longer once started.
+#   This is the worst-case battery sizing scenario used by
+#   9-control-scenarios/battery_capacity_sweep.py.
+CONTINUOUS_RUN   = False  # set True via --continuous-run CLI flag
 
 # ── Default paths (relative to this script) ──
 _HERE           = os.path.dirname(os.path.abspath(__file__))
@@ -181,13 +219,73 @@ def load_weekly_schedule(sched_dir: str, crop: str, year: int) -> list:
 # SCHEDULE BUILDER
 # ===========================================================================
 
+def load_daily_targets(sched_dir: str, crop: str, year: int) -> dict:
+    """
+    Build a per-day irrigation schedule from the SWD-based daily CSV
+    (``daily_<crop>_<year>.csv``) produced by irrigation_schedule.py.
+
+    This replaces ``build_daily_schedule`` for the simulation.  Instead of
+    dividing the weekly total evenly across irrigation days, each day carries
+    its actual accumulated soil-water deficit as the pump target.  Rainfall
+    surpluses on non-irrigation days are correctly propagated forward rather
+    than discarded.
+
+    Parameters
+    ----------
+    sched_dir : str
+        Directory containing the daily CSV (same as the weekly CSV).
+    crop : str
+        Crop name (e.g. 'cassava').
+    year : int
+        Planting year (season starting in that year).
+
+    Returns
+    -------
+    dict  {date_str: {'irrigate': bool, 'target_hrs': float}}
+
+    Raises
+    ------
+    FileNotFoundError
+        If the daily CSV does not exist (run irrigation_schedule.py first).
+    KeyError
+        If the daily CSV is missing the ``irr_target_mm`` column (old format;
+        re-run irrigation_schedule.py to regenerate with SWD columns).
+    """
+    slug = crop.replace('_', '-')
+    path = os.path.join(os.path.abspath(sched_dir), f'daily_{slug}_{year}.csv')
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Daily schedule CSV not found: {path}\n"
+            f"Run: python 4-irrigation/irrigation_schedule.py --crop {crop}")
+
+    daily: dict = {}
+    with open(path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        if 'irr_target_mm' not in (reader.fieldnames or []):
+            raise KeyError(
+                f"'irr_target_mm' column missing from {path}.\n"
+                f"Regenerate with: python 4-irrigation/irrigation_schedule.py")
+        for r in reader:
+            irr_mm   = float(r['irr_target_mm'] or 0.0)
+            irrigate = irr_mm > 0.01    # tiny threshold against float noise
+            # Pump hours = volume needed / net application rate; capped at daily max
+            target_hrs = min(irr_mm / NET_APP_RATE_MM_HR, MAX_DAILY_HRS) if irrigate else 0.0
+            daily[r['date']] = {
+                'irrigate'  : irrigate,
+                'target_hrs': target_hrs,
+            }
+    return daily
+
+
 def build_daily_schedule(weekly: list) -> dict:
     """
-    Expand the weekly schedule into a per-day dict:
-      {date_str: {'irrigate': bool, 'target_hrs': float}}
+    Legacy equal-distribution schedule builder (kept for reference).
 
-    Irrigation days within each week are assigned using the SCHEDULE_DOW
-    mapping (e.g. 3 days/week → Mon / Wed / Fri).
+    Expands the weekly schedule into a per-day dict using DOW assignment and
+    divides the weekly total evenly across irrigation days.  Superseded by
+    ``load_daily_targets`` which uses SWD-based per-event targets.
+
+    Still used as fallback when the daily CSV is unavailable.
     """
     daily_sched = {}
     for w in weekly:
@@ -243,10 +341,12 @@ def simulate_season(solar_power: dict, daily_sched: dict,
     max_soc    = 0.0 if no_battery else battery_kwh * BATTERY_MAX_SOC_PCT
     soc        = 0.0 if no_battery else battery_kwh * BATTERY_INITIAL_SOC_PCT
 
-    current_date  = None
-    daily_hrs_run = 0.0
-    target_hrs    = 0.0
-    is_irr_day    = False
+    current_date       = None
+    daily_hrs_run      = 0.0
+    target_hrs         = 0.0
+    is_irr_day         = False
+    pump_started_today = False   # True once the pump has run ≥ 1 hour today
+    pump_halted_today  = False   # True once a continuous-run session was interrupted
 
     records = []
 
@@ -261,19 +361,23 @@ def simulate_season(solar_power: dict, daily_sched: dict,
 
         # ── New calendar day ──
         if d_str != current_date:
-            current_date  = d_str
-            daily_hrs_run = 0.0
-            sched         = daily_sched.get(d_str, {'irrigate': False, 'target_hrs': 0.0})
-            is_irr_day    = sched['irrigate']
-            target_hrs    = sched['target_hrs']
+            current_date       = d_str
+            daily_hrs_run      = 0.0
+            sched              = daily_sched.get(d_str, {'irrigate': False, 'target_hrs': 0.0})
+            is_irr_day         = sched['irrigate']
+            target_hrs         = sched['target_hrs']
+            pump_started_today = False
+            pump_halted_today  = False
 
+        hour       = int(dt_str[11:13])   # local hour 0–23 from "YYYY-MM-DDTHH:…"
         P_dc       = P_dc_raw * panel_scale
         P_solar_ac = P_dc * INVERTER_EFF
         is_daytime = P_dc >= MIN_SOLAR_FOR_DISCHARGE
 
         # ── Can the pump run this hour? ──
-        need_more = daily_hrs_run < target_hrs
-        pump_can_try = is_irr_day and need_more
+        need_more    = daily_hrs_run < target_hrs
+        after_start  = hour >= PUMP_START_HOUR  # don't run before 8 AM local time
+        pump_can_try = is_irr_day and need_more and after_start
 
         pump_on            = False
         P_solar_to_pump    = 0.0
@@ -286,6 +390,12 @@ def simulate_season(solar_power: dict, daily_sched: dict,
             failure_reason = 'not_scheduled'
         elif not need_more:
             failure_reason = 'target_reached'
+        elif not after_start:
+            failure_reason = 'before_start_hour'
+        elif CONTINUOUS_RUN and pump_halted_today:
+            # Continuous-run mode: session was interrupted earlier today; no restart
+            failure_reason = 'continuous_run_halted'
+            pump_can_try   = False
 
         if pump_can_try:
             if no_battery:
@@ -345,7 +455,19 @@ def simulate_season(solar_power: dict, daily_sched: dict,
                 soc += stored
 
         if pump_on:
-            daily_hrs_run += 1.0
+            daily_hrs_run      += 1.0
+            pump_started_today  = True
+        elif pump_can_try and CONTINUOUS_RUN:
+            if pump_started_today:
+                # Pump was running earlier today but energy failed this hour —
+                # the continuous-run session is over; no restart.
+                pump_halted_today = True
+            elif hour == PUMP_START_HOUR:
+                # Pump could not start at the scheduled start hour.
+                # In continuous-run mode this models a farmer who arrives once,
+                # finds insufficient power, and leaves without starting the pump.
+                # No later starts are permitted for the rest of the day.
+                pump_halted_today = True
 
         records.append({
             'datetime'         : dt_str,
@@ -744,13 +866,26 @@ def main():
                         help=f'Number of solar panels (default: {N_PANELS}).')
     parser.add_argument('--no-plots', action='store_true',
                         help='Skip plot generation.')
+    parser.add_argument('--continuous-run', action='store_true',
+                        help=(
+                            'Enable continuous-run control mode.  Once the pump '
+                            'starts for the day and then fails in a subsequent hour '
+                            '(energy insufficient), it does NOT restart — modelling '
+                            'a Tier 1 system where the farmer switches the pump on '
+                            'and leaves.  Default: off (solar-following mode, pump '
+                            'skips cloudy hours and resumes when conditions improve).'))
     args = parser.parse_args()
 
-    year     = args.year
-    harv_yr  = year + 1 if 5 < 9 else year  # harvest year (May of following year)
-    harv_yr  = year + 1   # season spans Sep → May of next year
+    # Apply continuous-run mode if requested
+    global CONTINUOUS_RUN
+    CONTINUOUS_RUN = args.continuous_run
 
+    year    = args.year
+    harv_yr = year + 1   # season spans Sep → May of next year
+
+    mode_label = 'continuous-run (Tier 1)' if CONTINUOUS_RUN else 'solar-following (default)'
     print(f'\nLoading data for season {year}/{harv_yr} ({args.crop}) …')
+    print(f'  Control mode: {mode_label}')
 
     # Load solar power for planting year AND harvest year (season spans 2 cal. years)
     solar_power = {}
@@ -768,8 +903,15 @@ def main():
     weekly_sched = load_weekly_schedule(args.sched_dir, args.crop, year)
     print(f'  Weekly schedule: {len(weekly_sched)} weeks')
 
-    # Build daily schedule
-    daily_sched = build_daily_schedule(weekly_sched)
+    # Build daily schedule from SWD-based daily CSV (preferred) or fall back
+    # to the legacy equal-distribution method if the daily CSV is missing.
+    try:
+        daily_sched = load_daily_targets(args.sched_dir, args.crop, year)
+        print(f'  Using SWD-based per-day targets from daily CSV.')
+    except (FileNotFoundError, KeyError) as e:
+        print(f'  WARNING: {e}')
+        print(f'  Falling back to equal-distribution schedule.')
+        daily_sched = build_daily_schedule(weekly_sched)
     total_irr_days = sum(1 for v in daily_sched.values() if v['irrigate'])
     print(f'  Irrigation days planned: {total_irr_days}')
 
@@ -796,7 +938,8 @@ def main():
     # directory stays navigable even after many sweep runs.
     # Folder structure:  results/<crop>_<year>_p<panels>_b<battery>kWh/
     slug     = args.crop.replace('_', '-')
-    tag      = f'{slug}_{year}_p{args.panels}_b{args.battery_kwh:.0f}kWh'
+    mode_sfx = '_cr' if CONTINUOUS_RUN else ''
+    tag      = f'{slug}_{year}_p{args.panels}_b{args.battery_kwh:.0f}kWh{mode_sfx}'
     out_dir  = os.path.join(args.output_dir, tag)
     os.makedirs(out_dir, exist_ok=True)
     save_csv(daily_res,

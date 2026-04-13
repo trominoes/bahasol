@@ -1,0 +1,3 @@
+scenario,K_m_per_day,T_m2_per_day,s_theis_ft,s_theis_cm,pct_avail_drawdown,rec_90_pct_hr,rec_99_pct_hr
+conservative,50.0,500.0,0.5021,15.3,2.64,0.0,0.0
+moderate,200.0,2000.0,0.1397,4.26,0.74,0.0,0.0

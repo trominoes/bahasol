@@ -40,7 +40,7 @@ Plot inventory (in output order)
 # USER PARAMETERS  — edit these when running from VSCode / F5
 # =============================================================================
 
-YEAR         = 2022
+YEAR         = 2018
 INPUT_CSV    = f'one-year-analysis/1-solar-power/gen-power/4469509_24.96_-78.05_{YEAR}_power.csv'
 IMAGES_DIR   = f'one-year-analysis/1-solar-power/images/{YEAR}'
 THRESHOLD_KW = 1.0      # Power threshold for the hours-above plot [kW]

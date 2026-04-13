@@ -1,19 +1,42 @@
-# Module 5 — Integrated Energy Analysis (Schedule-Constrained)
+# Module 5 — Integrated Energy Analysis (Simulation Library)
 
 ## Purpose
 
-Determines whether the solar + battery system can reliably power the
-irrigation pump **on the specific days and for the specific durations** demanded
-by the Module 4 irrigation schedule.
+This module serves a dual role:
+
+1. **Simulation library** — `integrated_analysis.py` is imported by Module 6
+   (`run_simulation.py`) and Module 9 (`battery_capacity_sweep.py`,
+   `start_time_sensitivity.py`).  It contains the authoritative
+   `simulate_season()` kernel and all helper functions.  When you run a sweep
+   or a control-scenario analysis you are always running code from this file.
+
+2. **Standalone script** — can be run directly for a quick single-year,
+   single-configuration analysis with diagnostic plots.
+
+The simulation determines whether the solar + battery system can reliably
+power the irrigation pump **on the specific days and for the specific durations**
+demanded by the Module 4 irrigation schedule.
 
 Unlike Module 3 (which greedily accumulates all available pump hours), this
 simulation enforces the weekly schedule: the pump only runs on designated
-irrigation days and must accumulate exactly the target hours each day.  Weeks
+irrigation days and must accumulate exactly the target hours each day.  Days
 where the system falls short are flagged as failures and counted against the
 reliability metric.
 
 **Reliability** is defined as the percentage of scheduled irrigation days on
 which the pump delivers its full target run time.
+
+### Control modes
+
+The simulation supports two control strategies, selectable via `--continuous-run`:
+
+| Mode | Flag | Behaviour |
+|---|---|---|
+| Solar-following (default) | *(none)* | Pump skips cloudy hours and resumes whenever solar + battery conditions improve.  Maximum flexibility; higher reliability. |
+| Continuous-run (Tier 1) | `--continuous-run` | Once the pump starts for the day, it runs until energy fails.  It does **not** restart if conditions improve later.  Models a manual on/off switch. |
+
+The continuous-run mode is the more conservative sizing assumption and is used
+by default in the Module 9 control-scenario sweeps.
 
 ---
 
@@ -27,6 +50,8 @@ python integrated_analysis.py --year 2022
 python integrated_analysis.py --crop tomato --year 2021
 python integrated_analysis.py --panels 20 --battery-kwh 4
 python integrated_analysis.py --year 2020 --panels 10 --battery-kwh 1
+python integrated_analysis.py --continuous-run             # Tier 1: pump halts if energy fails mid-day
+python integrated_analysis.py --year 2021 --battery-kwh 3 --continuous-run
 ```
 
 Key parameters:
@@ -41,6 +66,7 @@ Key parameters:
 | `INVERTER_EFF` | 96 % | DC → AC conversion efficiency |
 | `BATTERY_CHARGE_EFF` | 95 % | Charge round-trip efficiency |
 | `BATTERY_DISCHARGE_EFF` | 95 % | Discharge round-trip efficiency |
+| `CONTINUOUS_RUN` | `False` | Enable Tier 1 continuous-run mode (see above) |
 
 ### Panel Count Scaling
 
@@ -150,3 +176,6 @@ Typical results for cassava at this site:
 Use Module 6 (`--sweep-panels`, `--sweep-battery`) to generate a full
 reliability matrix across configurations, and Module 7 to find the
 minimum-cost configuration meeting your target.
+
+For control-strategy sweeps (battery sizing under continuous-run, pump
+start-time sensitivity), see Module 9 (`9-control-scenarios/`).

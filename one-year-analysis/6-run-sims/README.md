@@ -31,6 +31,13 @@ python run_simulation.py --years 2018 2019 2020 2021 2022 2023 2024
 
 # Parameter sweep — generates reliability matrix CSV
 python run_simulation.py --sweep-panels 10 12 15 18 20 --sweep-battery 1 2 3 4 5
+
+# Tier 1 continuous-run control mode (pump halts once energy fails mid-day)
+python run_simulation.py --continuous-run --stages 4
+python run_simulation.py --continuous-run --battery-kwh 3 --year 2021
+
+# Sweep under continuous-run (verify battery sizing from stage 9)
+python run_simulation.py --continuous-run --sweep-battery 0.5 1 1.5 2 3 5
 ```
 
 ---
@@ -54,6 +61,7 @@ using flags.  All flags override CONFIG at runtime.
 | `tilt_deg` | 24 ° | Panel tilt |
 | `performance_ratio` | 0.85 | Solar PR |
 | `eff_rain_factor` | 0.80 | Effective rainfall fraction |
+| `continuous_run` | `False` | `True` = Tier 1 continuous-run mode (pump halts once energy fails) |
 
 ---
 
@@ -99,7 +107,8 @@ Use for a fresh analysis of a new site or crop, or after updating NSRDB files.
 ## Outputs
 
 All outputs go to `output/<tag>/` inside this folder.  The tag encodes the
-configuration, e.g. `p15_b2kWh_cassava_yr2018-2024`.
+configuration, e.g. `p15_b2kWh_cassava_yr2018-2024`.  When `--continuous-run`
+is set, the tag gets a `_cr` suffix: `p15_b2kWh_cassava_yr2018-2024_cr`.
 
 ```
 output/<tag>/

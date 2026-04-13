@@ -19,7 +19,7 @@ fully served).
 
 ## Analysis Pipeline
 
-The analysis is organized as a seven-module pipeline, each in a numbered
+The analysis is organized as a nine-module pipeline, each in a numbered
 folder.  Modules may be run independently or chained together via the master
 script in `6-run-sims/`.
 
@@ -29,9 +29,13 @@ script in `6-run-sims/`.
 3-operating-hours-      Greedy battery+pump simulation (how many hours can
   available/              the pump run each year regardless of schedule?)
 4-irrigation/           FAO-56 ET₀, crop water demand, weekly schedule
-5-integrated-analysis/  Schedule-constrained energy simulation (reliability)
+5-integrated-analysis/  Simulation library — schedule-constrained energy model
+                          (imported by stages 6 and 9; also runnable standalone)
 6-run-sims/             Master orchestrator — sweep parameters, compare configs
 7-cost-analysis/        Component costs, shipping, and minimum-cost optimization
+8-well-analysis/        Well sustainability — aquifer drawdown and water balance
+9-control-scenarios/    Control strategy analysis — battery sizing sweep and
+                          pump start-time sensitivity under Tier 1 continuous-run
 ```
 
 Each folder contains its own `README.md` with purpose, usage instructions,
@@ -71,8 +75,15 @@ cd 4-irrigation && python irrigation_schedule.py --year 2021 --crop cassava
 # Run integrated energy/reliability analysis
 cd 5-integrated-analysis && python integrated_analysis.py --year 2021 --panels 15
 
+# Run with continuous-run (Tier 1) control mode
+cd 5-integrated-analysis && python integrated_analysis.py --year 2021 --continuous-run
+
 # Find minimum-cost configuration meeting a reliability threshold
 cd 7-cost-analysis && python cost_analysis.py --reliability 95
+
+# Control scenario analyses (battery sizing + start-time sensitivity)
+cd 9-control-scenarios && python battery_capacity_sweep.py
+cd 9-control-scenarios && python start_time_sensitivity.py
 ```
 
 ---
@@ -121,15 +132,23 @@ NSRDB raw CSVs
                                 │
       ┌─────────────────────────┴────────────────────────┐
       ▼                                                   ▼
-3-operating-hours-available                    5-integrated-analysis
-(greedy pump hours)                            (schedule-constrained)
-                                                          ▲
-4-irrigation  →  et-data/ + results/  ─────────────────────┘
-                                                          │
-                                               6-run-sims/output/sweep/
-                                               reliability_matrix.csv
-                                                          │
-                                                          ▼
-                                               7-cost-analysis
-                                               (minimum-cost config)
+3-operating-hours-available            5-integrated-analysis  ←── library
+(greedy pump hours)                    (schedule-constrained)
+                                                │  ▲
+4-irrigation  →  et-data/ + results/  ──────────┘  │
+                                                   used by
+                                            ┌──────┴──────┐
+                                            ▼             ▼
+                                       6-run-sims    9-control-scenarios
+                                      (orchestrator)  (battery sweep,
+                                            │          start-time sensitivity)
+                                            ▼
+                                    output/sweep/
+                                    reliability_matrix.csv
+                                            │
+                                            ▼
+                                    7-cost-analysis
+                                    (minimum-cost config)
+                            4-irrigation/results/ → 8-well-analysis
+                                                    (aquifer drawdown)
 ```

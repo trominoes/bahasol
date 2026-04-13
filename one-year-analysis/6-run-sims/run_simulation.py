@@ -41,6 +41,10 @@ Parameter sweeps (MVP search):
     python run_simulation.py --sweep-battery 0 1 2 3 5
     python run_simulation.py --sweep-panels 12 15 18 --sweep-battery 1 2 3
 
+Control mode:
+    python run_simulation.py --continuous-run                # Tier 1: pump halts once energy fails mid-day
+    python run_simulation.py --continuous-run --battery-kwh 3  # continuous-run with specific battery size
+
 All outputs are written to  output/<tag>/  inside this folder.
 """
 
@@ -85,7 +89,13 @@ CONFIG = {
     # ── Battery ───────────────────────────────────────────────────────────────
     'battery_kwh'     : 2.0,            # nameplate capacity [kWh]  (0 = no battery)
     'battery_min_soc' : 0.10,           # minimum allowed SoC [fraction]
-    'battery_max_soc' : 1.00,           # maximum SoC [fraction]
+    'battery_max_soc' : 0.85,           # maximum SoC [fraction]
+                                        # 85% is healthier for LiFePO4 longevity
+                                        # (vs 100% which accelerates calendar aging)
+    'battery_degradation_factor': 0.85, # effective capacity multiplier for aged battery
+                                        # LiFePO4 at ~5 years seasonal use (~1,350 cycles):
+                                        # manufacturers specify 80% @ 2,000 cycles →
+                                        # ~85% retention at 1,350 cycles (linear interp.)
     'battery_charge_eff'   : 0.95,      # charge efficiency (AC → stored kWh)
     'battery_discharge_eff': 0.95,      # discharge efficiency (stored → AC)
 
@@ -101,7 +111,7 @@ CONFIG = {
     # ── Greedy pump schedule (Stage 2) ────────────────────────────────────────
     'greedy_schedule_days': 'all',      # 'all' or list of ISO weekday ints e.g. [1,3,5]
     'greedy_max_hrs_day'  : 6,          # max pump run-hours per scheduled day (Stage 2)
-    'pump_start_hour'     : 0,          # earliest hour pump may start (0 = no limit)
+    'pump_start_hour'     : 8,          # earliest local hour pump may start (8 = 8 AM)
     'min_solar_discharge' : 0.10,       # kW AC floor before battery discharges
 
     # ── Farm ─────────────────────────────────────────────────────────────────
@@ -113,6 +123,15 @@ CONFIG = {
 
     # ── Effective rainfall ────────────────────────────────────────────────────
     'eff_rain_factor' : 0.80,           # fraction of rainfall entering root zone
+
+    # ── Control mode ──────────────────────────────────────────────────────────
+    'continuous_run'  : False,          # False = solar-following (default)
+                                        # True  = continuous-run (Tier 1):
+                                        #   once the pump starts for the day and
+                                        #   then fails in a subsequent hour
+                                        #   (insufficient energy), it does NOT
+                                        #   restart — even if solar recovers later.
+                                        #   Mirrors a simple on/off manual switch.
 
 }
 
@@ -444,10 +463,18 @@ def run_stage4(cfg: dict, years: list, tag: str,
         'integrated_analysis',
         os.path.join(_ROOT, '5-integrated-analysis', 'integrated_analysis.py'))
 
-    int_mod.BATTERY_CAPACITY_KWH    = cfg['battery_kwh']
+    # Apply battery degradation: nameplate × factor = effective capacity
+    deg   = cfg.get('battery_degradation_factor', 1.0)
+    eff_kwh = cfg['battery_kwh'] * deg
+    print(f'  Battery: {cfg["battery_kwh"]:.1f} kWh nameplate × '
+          f'{deg:.0%} degradation = {eff_kwh:.2f} kWh effective')
+    print(f'  Max SoC: {cfg["battery_max_soc"]:.0%}  '
+          f'→ usable = {(cfg["battery_max_soc"] - cfg["battery_min_soc"]) * eff_kwh:.2f} kWh')
+
+    int_mod.BATTERY_CAPACITY_KWH    = eff_kwh
     int_mod.BATTERY_MIN_SOC_PCT     = cfg['battery_min_soc']
     int_mod.BATTERY_MAX_SOC_PCT     = cfg['battery_max_soc']
-    int_mod.BATTERY_INITIAL_SOC_PCT = 1.00
+    int_mod.BATTERY_INITIAL_SOC_PCT = cfg['battery_max_soc']  # start at max (not 100%)
     int_mod.BATTERY_CHARGE_EFF      = cfg['battery_charge_eff']
     int_mod.BATTERY_DISCHARGE_EFF   = cfg['battery_discharge_eff']
     int_mod.INVERTER_EFF            = cfg['inverter_eff']
@@ -455,11 +482,16 @@ def run_stage4(cfg: dict, years: list, tag: str,
     int_mod.MIN_SOLAR_FOR_DISCHARGE = cfg['min_solar_discharge']
     int_mod.N_PANELS                = cfg['n_panels']
     int_mod.PANEL_RATED_POWER_W     = cfg['panel_watt']
+    int_mod.PUMP_START_HOUR         = cfg['pump_start_hour']
+    int_mod.CONTINUOUS_RUN          = cfg.get('continuous_run', False)
 
     src_power_dir  = power_dir or _POWER_DIR
     src_sched_dir  = sched_dir or _IRR_DIR
     out_dir        = _out(tag, 'integrated')
     img_dir        = _out(tag, 'images-stage4')
+
+    mode_label = 'continuous-run (Tier 1)' if cfg.get('continuous_run', False) else 'solar-following (default)'
+    print(f'  Control mode: {mode_label}')
 
     slug = cfg['crop'].replace('_', '-')
     all_results = {}
@@ -484,18 +516,24 @@ def run_stage4(cfg: dict, years: list, tag: str,
             print(f'  WARNING: No weekly schedule for {yr}/{cfg["crop"]} — skipping.')
             continue
 
-        daily_sched = int_mod.build_daily_schedule(weekly_sched)
+        # Use SWD-based per-day targets from daily CSV (preferred over equal split)
+        try:
+            daily_sched = int_mod.load_daily_targets(src_sched_dir, cfg['crop'], yr)
+        except (FileNotFoundError, KeyError) as e:
+            print(f'  WARNING: {e} — falling back to equal-distribution schedule.')
+            daily_sched = int_mod.build_daily_schedule(weekly_sched)
         print(f'  Season {yr}/{yr+1} …')
 
         hourly    = int_mod.simulate_season(
-            solar_power, daily_sched, cfg['battery_kwh'], cfg['n_panels'])
+            solar_power, daily_sched, eff_kwh, cfg['n_panels'])
         daily_res = int_mod.aggregate_daily(hourly, daily_sched)
         weekly_res= int_mod.aggregate_weekly(daily_res, weekly_sched)
 
         int_mod.print_report(weekly_res, daily_res, yr, cfg['crop'],
                              cfg['battery_kwh'], cfg['n_panels'])
 
-        param_tag = f"{slug}_{yr}_p{cfg['n_panels']}_b{cfg['battery_kwh']:.0f}kWh"
+        mode_sfx  = '_cr' if cfg.get('continuous_run', False) else ''
+        param_tag = f"{slug}_{yr}_p{cfg['n_panels']}_b{cfg['battery_kwh']:.0f}kWh{mode_sfx}"
         int_mod.save_csv(daily_res,
                          os.path.join(out_dir, f'daily_energy_{param_tag}.csv'),
                          'daily energy')
@@ -537,17 +575,23 @@ def run_sweep(cfg: dict, years: list,
         int_mod = _load_module(
             'integrated_analysis',
             os.path.join(_ROOT, '5-integrated-analysis', 'integrated_analysis.py'))
-        int_mod.BATTERY_CAPACITY_KWH = batt_kwh
-        int_mod.N_PANELS             = n_panels
-        int_mod.PANEL_RATED_POWER_W  = cfg_sw['panel_watt']
-        int_mod.INVERTER_EFF         = cfg_sw['inverter_eff']
-        int_mod.PUMP_POWER_KW        = cfg_sw['pump_power_kw']
-        int_mod.BATTERY_MIN_SOC_PCT  = cfg_sw['battery_min_soc']
-        int_mod.BATTERY_MAX_SOC_PCT  = cfg_sw['battery_max_soc']
-        int_mod.BATTERY_CHARGE_EFF   = cfg_sw['battery_charge_eff']
-        int_mod.BATTERY_DISCHARGE_EFF= cfg_sw['battery_discharge_eff']
+        # Apply battery degradation to nameplate capacity
+        deg_sw   = cfg_sw.get('battery_degradation_factor', 1.0)
+        eff_kwh  = batt_kwh * deg_sw
+
+        int_mod.BATTERY_CAPACITY_KWH    = eff_kwh
+        int_mod.N_PANELS                = n_panels
+        int_mod.PANEL_RATED_POWER_W     = cfg_sw['panel_watt']
+        int_mod.INVERTER_EFF            = cfg_sw['inverter_eff']
+        int_mod.PUMP_POWER_KW           = cfg_sw['pump_power_kw']
+        int_mod.BATTERY_MIN_SOC_PCT     = cfg_sw['battery_min_soc']
+        int_mod.BATTERY_MAX_SOC_PCT     = cfg_sw['battery_max_soc']
+        int_mod.BATTERY_CHARGE_EFF      = cfg_sw['battery_charge_eff']
+        int_mod.BATTERY_DISCHARGE_EFF   = cfg_sw['battery_discharge_eff']
         int_mod.MIN_SOLAR_FOR_DISCHARGE = cfg_sw['min_solar_discharge']
-        int_mod.BATTERY_INITIAL_SOC_PCT = 1.00
+        int_mod.BATTERY_INITIAL_SOC_PCT = cfg_sw['battery_max_soc']  # start at max SoC
+        int_mod.PUMP_START_HOUR         = cfg_sw['pump_start_hour']
+        int_mod.CONTINUOUS_RUN          = cfg_sw.get('continuous_run', False)
 
         slug = cfg_sw['crop'].replace('_', '-')
         year_reliabilities = []
@@ -566,9 +610,14 @@ def run_sweep(cfg: dict, years: list,
             except FileNotFoundError:
                 continue
 
-            daily_sched = int_mod.build_daily_schedule(weekly_sched)
+            # Use SWD-based per-day targets; fall back to equal-split if CSV is old
+            try:
+                daily_sched = int_mod.load_daily_targets(_IRR_DIR, cfg_sw['crop'], yr)
+            except (FileNotFoundError, KeyError):
+                daily_sched = int_mod.build_daily_schedule(weekly_sched)
+
             hourly      = int_mod.simulate_season(
-                solar_power, daily_sched, batt_kwh, n_panels)
+                solar_power, daily_sched, eff_kwh, n_panels)
             daily_res   = int_mod.aggregate_daily(hourly, daily_sched)
             weekly_res  = int_mod.aggregate_weekly(daily_res, weekly_sched)
 
@@ -662,6 +711,8 @@ def main():
             '  python run_simulation.py --crop tomato --year 2020\n'
             '  python run_simulation.py --sweep-panels 10 12 15 18 '
             '--sweep-battery 1 2 3\n'
+            '  python run_simulation.py --continuous-run --battery-kwh 3  '
+            '# Tier 1 control mode\n'
         ),
     )
     # Scope
@@ -677,7 +728,15 @@ def main():
     parser.add_argument('--panels', type=int, default=None,
                         help=f'Number of solar panels (CONFIG: {CONFIG["n_panels"]}).')
     parser.add_argument('--battery-kwh', type=float, default=None,
-                        help=f'Battery capacity kWh (CONFIG: {CONFIG["battery_kwh"]}).')
+                        help=f'Battery nameplate capacity kWh (CONFIG: {CONFIG["battery_kwh"]}).')
+    parser.add_argument('--battery-max-soc', type=float, default=None,
+                        help=f'Battery max SoC fraction 0–1 (CONFIG: {CONFIG["battery_max_soc"]}).')
+    parser.add_argument('--battery-degradation', type=float, default=None,
+                        help=f'Capacity multiplier for aged battery, e.g. 0.85 for ~5yr '
+                             f'(CONFIG: {CONFIG["battery_degradation_factor"]}).')
+    parser.add_argument('--pump-start-hour', type=int, default=None,
+                        help=f'Earliest local hour (0–23) pump may start (CONFIG: {CONFIG["pump_start_hour"]}). '
+                             f'8 = 8 AM, reflecting manual operation after sunrise.')
     parser.add_argument('--pump-power-kw', type=float, default=None,
                         help=f'Pump AC power kW (CONFIG: {CONFIG["pump_power_kw"]}).')
     parser.add_argument('--pump-flow-gpm', type=float, default=None,
@@ -693,18 +752,35 @@ def main():
     parser.add_argument('--drip-eff', type=float, default=None,
                         help=f'Drip efficiency 0–1 (CONFIG: {CONFIG["drip_efficiency"]}).')
 
+    # Control mode
+    parser.add_argument('--continuous-run', action='store_true', default=False,
+                        help=('Enable continuous-run control mode (Tier 1). '
+                              'Once the pump starts for the day and then fails in a '
+                              'subsequent hour (insufficient energy), it does NOT '
+                              'restart — even if solar recovers later. '
+                              'Default: solar-following (pump skips cloudy hours and '
+                              'resumes when conditions improve).'))
+
     # Sweep mode
     parser.add_argument('--sweep-panels', type=int, nargs='+', default=None,
                         help='Sweep over panel counts. Enables parameter sweep mode.')
     parser.add_argument('--sweep-battery', type=float, nargs='+', default=None,
                         help='Sweep over battery capacities [kWh].')
+    # ── Planned future sweep (for reference) ──────────────────────────────────
+    # python run_simulation.py \
+    #     --sweep-panels 9 11 13 15 \
+    #     --sweep-battery 1 2 3 4 5 6 7 8 9 10
+    # ─────────────────────────────────────────────────────────────────────────
 
     args = parser.parse_args()
 
     # ── Build effective config ──
     cfg = dict(CONFIG)
-    if args.panels       is not None: cfg['n_panels']        = args.panels
-    if args.battery_kwh  is not None: cfg['battery_kwh']     = args.battery_kwh
+    if args.panels            is not None: cfg['n_panels']                 = args.panels
+    if args.battery_kwh       is not None: cfg['battery_kwh']              = args.battery_kwh
+    if args.battery_max_soc   is not None: cfg['battery_max_soc']          = args.battery_max_soc
+    if args.battery_degradation is not None: cfg['battery_degradation_factor'] = args.battery_degradation
+    if args.pump_start_hour is not None: cfg['pump_start_hour'] = args.pump_start_hour
     if args.pump_power_kw is not None: cfg['pump_power_kw']  = args.pump_power_kw
     if args.pump_flow_gpm is not None: cfg['pump_flow_gpm']  = args.pump_flow_gpm
     if args.tilt         is not None: cfg['tilt_deg']        = args.tilt
@@ -712,6 +788,7 @@ def main():
     if args.crop         is not None: cfg['crop']            = args.crop
     if args.performance_ratio is not None: cfg['performance_ratio'] = args.performance_ratio
     if args.drip_eff     is not None: cfg['drip_efficiency'] = args.drip_eff
+    cfg['continuous_run'] = args.continuous_run
 
     if args.year:
         years = [args.year]
@@ -723,9 +800,11 @@ def main():
     stages = sorted(set(args.stages))
 
     # ── Run tag ──
+    mode_sfx = '_cr' if cfg.get('continuous_run', False) else ''
     tag = (f"p{cfg['n_panels']}_b{cfg['battery_kwh']:.0f}kWh"
            f"_{cfg['crop']}_yr{years[0]}" +
-           (f"-{years[-1]}" if len(years) > 1 else ''))
+           (f"-{years[-1]}" if len(years) > 1 else '') +
+           mode_sfx)
 
     print(f'\n{"═"*72}')
     print(f'  BahaSol Simulation Run')
@@ -738,6 +817,8 @@ def main():
     print(f'  Pump    : {cfg["pump_power_kw"]:.3f}kW / {cfg["pump_flow_gpm"]:.2f}GPM')
     print(f'  Crop    : {cfg["crop"]}  |  '
           f'Tilt: {cfg["tilt_deg"]}°  |  PR: {cfg["performance_ratio"]:.2f}')
+    ctrl_mode = 'continuous-run (Tier 1)' if cfg.get('continuous_run', False) else 'solar-following (default)'
+    print(f'  Control : {ctrl_mode}')
     print(f'{"═"*72}')
 
     # ── Parameter sweep mode ──

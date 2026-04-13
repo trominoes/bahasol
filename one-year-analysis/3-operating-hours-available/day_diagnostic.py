@@ -40,7 +40,7 @@ SOLAR_CSV  = (
     f'4469509_24.96_-78.05_{YEAR}_power.csv'
 )
 SYSTEM_CSV = (
-    f'one-year-analysis/3-operating-hours/battery-pump/'
+    f'one-year-analysis/3-operating-hours-available/battery-pump/'
     f'4469509_24.96_-78.05_{YEAR}_system.csv'
 )
 IMAGES_DIR = f'one-year-analysis/3-operating-hours/images/{YEAR}'

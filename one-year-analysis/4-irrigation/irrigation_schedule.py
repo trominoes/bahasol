@@ -80,6 +80,20 @@ EFF_RAIN_FACTOR = 0.80
 DRY_SPELL_THRESHOLD_DAYS = 14
 DRY_PRECIP_MM_DAY        = 2.0   # days with less than this count as "dry"
 
+# Day-of-week assignment for each irrigation frequency (1=Mon … 7=Sun).
+# Must match the identical mapping in 5-integrated-analysis/integrated_analysis.py
+# so that both modules agree on which calendar dates are irrigation days.
+SCHEDULE_DOW = {
+    0: [],
+    1: [1],
+    2: [1, 4],            # Mon, Thu
+    3: [1, 3, 5],         # Mon, Wed, Fri
+    4: [1, 2, 4, 5],      # Mon, Tue, Thu, Fri
+    5: [1, 2, 3, 4, 5],   # weekdays
+    6: [1, 2, 3, 4, 5, 6],
+    7: [1, 2, 3, 4, 5, 6, 7],
+}
+
 # ===========================================================================
 # GROWING SEASON DEFAULTS
 # ===========================================================================
@@ -328,6 +342,77 @@ def season_bounds(planting_year: int,
 
 
 # ===========================================================================
+# SOIL WATER DEFICIT TRACKING
+# ===========================================================================
+
+def compute_daily_swd(daily_rows: list, weekly_rows: list) -> list:
+    """
+    Post-process daily rows to add soil-water-deficit (SWD) based irrigation
+    targets, correcting the simpler equal-distribution approach.
+
+    The SWD is a running tally of unmet crop water demand [mm].  It grows
+    each day by (ETc − effective_rain) and is clipped at 0 from below
+    (surplus rain fully recharges the root zone to field capacity; the model
+    does not track waterlogging or deep percolation above field capacity).
+    On each irrigation day the accumulated SWD is delivered by the pump and
+    the deficit resets to 0.  On non-irrigation days no water is applied.
+
+    This fixes two problems with the naive daily-sum → equal-split approach:
+      1. Rainfall surpluses on non-irrigation days are no longer discarded;
+         they carry forward and reduce the next irrigation event's target.
+      2. Per-event volumes reflect the actual accumulated demand, not a
+         uniform fraction of a 7-day aggregate.
+
+    Two columns are added to each row **in-place**:
+        irr_target_mm  irrigation volume to deliver on this day [mm]
+                        (> 0 only on irrigation days; equals SWD at that point)
+        swd_mm         soil water deficit at end of day, after any irrigation
+
+    Parameters
+    ----------
+    daily_rows   : list of dicts from analyze_season() (modified in place)
+    weekly_rows  : weekly summary dicts (provides irr_days_week per week,
+                   used to derive which days-of-week are irrigation days)
+
+    Returns
+    -------
+    daily_rows   (same list, modified in place for convenience)
+    """
+    # Build date → weekly-row lookup
+    week_by_date: dict = {}
+    for w in weekly_rows:
+        start = date.fromisoformat(w['week_start'])
+        end   = date.fromisoformat(w['week_end'])
+        cur   = start
+        while cur <= end:
+            week_by_date[cur.isoformat()] = w
+            cur += timedelta(days=1)
+
+    swd = 0.0  # soil water deficit running total [mm]
+
+    for row in daily_rows:
+        d   = date.fromisoformat(row['date'])
+        w   = week_by_date.get(row['date'], {})
+        n   = w.get('irr_days_week', 0)       # irrigation days this week
+        dow = SCHEDULE_DOW.get(n, [])          # which weekdays (ISO 1-7)
+
+        # Accumulate deficit BEFORE the irrigation decision for today
+        swd += row['ETc_mm'] - row['eff_precip_mm']
+        swd  = max(0.0, swd)   # root zone cannot be below field capacity
+
+        if d.isoweekday() in dow and n > 0:
+            # Irrigation day: deliver the full accumulated deficit
+            row['irr_target_mm'] = round(swd, 2)
+            swd = 0.0           # deficit resets after irrigation
+        else:
+            row['irr_target_mm'] = 0.0
+
+        row['swd_mm'] = round(swd, 2)
+
+    return daily_rows
+
+
+# ===========================================================================
 # MAIN SEASONAL ANALYSIS
 # ===========================================================================
 
@@ -382,7 +467,7 @@ def analyze_season(data: dict, crop: dict,
     if not daily_rows:
         return [], []
 
-    # --- Aggregate to weeks ---
+    # ── Aggregate to weeks ──────────────────────────────────────────────────
     weekly_rows = []
     for i in range(0, len(daily_rows), 7):
         chunk = daily_rows[i: i + 7]
@@ -418,6 +503,10 @@ def analyze_season(data: dict, crop: dict,
             'capacity_mm'   : round(cap,     1),
             'deficit_mm'    : round(deficit, 1),
         })
+
+    # ── Add SWD-based per-day irrigation targets ────────────────────────────
+    # Must happen AFTER weekly_rows are finalised (needed for DOW lookup).
+    compute_daily_swd(daily_rows, weekly_rows)
 
     return daily_rows, weekly_rows
 
